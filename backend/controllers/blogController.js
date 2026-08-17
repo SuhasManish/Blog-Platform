@@ -1,4 +1,27 @@
 
+const { S3Client, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+
+const s3 = new S3Client({
+  region: process.env.AWS_REGION || 'ap-south-1'
+});
+
+const S3_BUCKET = process.env.S3_BUCKET || 'blog-platform-india';
+
+async function deleteMediaFromS3(mediaUrl) {
+  if (!mediaUrl || !mediaUrl.startsWith('/uploads/')) return;
+
+  const key = mediaUrl.substring(1);
+
+  try {
+    await s3.send(new DeleteObjectCommand({
+      Bucket: S3_BUCKET,
+      Key: key
+    }));
+  } catch (err) {
+    console.error('Failed to delete media from S3:', err);
+  }
+}
+
 const pool = require('../db');  // Import the PostgreSQL pool
 const path = require('path');   // To handle file paths
 const fs = require('fs'); // To check if file path exists
@@ -18,7 +41,7 @@ exports.createBlog = async (req, res) => {
       return res.status(400).json({ message: 'Media file is required for new blog posts.' });
     }
 
-    const media_url = `/uploads/${req.file.filename}`;
+    const media_url = `/${req.file.key}`;
 
     // Extract user_id from the decoded token (from verifyToken middleware)
     const user_id = req.user.userId;  // Ensure user_id is safely extracted from req.user
@@ -77,13 +100,17 @@ exports.updateBlog = async (req, res) => {
     }
 
     // Use existing media_url if no new file is uploaded
-    const media_url = req.file ? `/uploads/${req.file.filename}` : blog.media_url;
+    const media_url = req.file ? `/${req.file.key}` : blog.media_url;
 
     // Update blog in DB
     const updateResult = await pool.query(
       'UPDATE blogs SET title = $1, content = $2, media_url = $3, media_type = $4, membership = $5 WHERE id = $6 RETURNING *',
       [title, content, media_url, media_type, membership, id]
     );
+
+    if (req.file && blog.media_url && blog.media_url !== media_url) {
+      await deleteMediaFromS3(blog.media_url);
+    }
 
     const updatedBlog = updateResult.rows[0];
     res.status(200).json({ message: 'Blog updated successfully', blog: updatedBlog });
@@ -146,6 +173,8 @@ exports.deleteBlog = async (req, res) => {
 
     // Delete the blog post from the database
     await pool.query('DELETE FROM blogs WHERE id = $1', [id]);
+
+    await deleteMediaFromS3(blog.media_url);
 
     res.status(200).json({ message: 'Blog deleted successfully' });
   } catch (error) {
